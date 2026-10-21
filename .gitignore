@@ -1,0 +1,7 @@
+node_modules
+dist
+public/tesseract
+.DS_Store
+.vercel
+public/__t
+.env*
