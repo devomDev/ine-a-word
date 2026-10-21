@@ -20,7 +20,8 @@ const LETTERS = "ABCDEFGHIJKLMNÑOPQRSTUVWXYZÁÉÍÓÚÜ ";
 
 async function pageToCanvas(page) {
   const base = page.getViewport({ scale: 1 });
-  const scale = Math.min(4, 2600 / base.width);
+  // Escala por el lado mayor: misma resolución sin importar si la página viene girada
+  const scale = Math.min(4, 3400 / Math.max(base.width, base.height));
   const vp = page.getViewport({ scale });
   const canvas = document.createElement("canvas");
   canvas.width = Math.floor(vp.width);
