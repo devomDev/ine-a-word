@@ -143,7 +143,7 @@ export function validClave(k) {
   return typeof k === "string" && /^[A-Z]{6}\d{6}\d{2}[HM]\d{3}$/.test(k);
 }
 
-const AMB = "0-9OIZSBGQDTL";
+const AMB = "0-9OIZSBGQDTLA";
 const CLAVE_RE = new RegExp(`[A-Z0-9]{6}[${AMB}]{8}[HM][${AMB}]{3}`, "g");
 
 export function findClave(text, curp = "") {
@@ -198,6 +198,8 @@ export function cleanNameLine(s) {
     .split(/\s+/)
     .filter((t) => t.length > 2 || PARTICLES.has(t))
     .join(" ")
+    // "NÑ"/"ÑN" no existen en español: es ruido del holograma sobre la N
+    .replace(/NÑ|ÑN/g, "N")
     .replace(/^(DE|LA|LAS|LOS|DEL|Y)( (DE|LA|LAS|LOS|DEL|Y))*$/, "")
     .trim();
 }
@@ -215,24 +217,34 @@ const initialOk = (s, ch, isGiven) => {
   return isGiven && /^(JOSE|MARIA|MA|J) \S/.test(s) && s.split(" ")[1][0] === ch;
 };
 
-// Elige la mejor lectura de una línea: votos entre variantes + coherencia con CURP y clave
+function lev(a, b) {
+  const d = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let prev = d[0];
+    d[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = d[j];
+      d[j] = Math.min(d[j] + 1, d[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = tmp;
+    }
+  }
+  return d[b.length];
+}
+
+// Elige la mejor lectura de una línea: consenso entre variantes (similitud con las demás
+// lecturas) + coherencia con CURP y clave
 export function pickNameLine(readings, { initial = "", pair = "", given = false } = {}) {
-  // Se agrupa sin espacios ("OMARAARON" = "OMAR AARON") y se conserva la variante con más espacios
-  const groups = new Map();
-  for (const r of readings) {
-    const c = cleanNameLine(r);
-    const key = c.replace(/ /g, "");
-    if (key.length < 2) continue;
-    const g = groups.get(key) || { votes: 0, text: c };
-    g.votes++;
-    if (c.split(" ").length > g.text.split(" ").length) g.text = c;
-    groups.set(key, g);
-  }
-  let best = "", bestScore = -1;
-  for (const { votes, text } of groups.values()) {
-    const s = votes + (initialOk(text, initial, given) ? 2 : 0) + (pair && pairOf(text) === pair ? 2 : 0);
-    if (s > bestScore) { best = text; bestScore = s; }
-  }
+  const cleaned = readings.map(cleanNameLine).filter((c) => c.replace(/ /g, "").length >= 2);
+  const keys = cleaned.map((c) => c.replace(/ /g, ""));
+  let best = "", bestScore = -Infinity;
+  cleaned.forEach((c, i) => {
+    const k = keys[i];
+    const consensus = keys.reduce((sum, o) => sum + 1 - lev(k, o) / Math.max(k.length, o.length), 0);
+    // Entre lecturas iguales sin espacios, se prefiere la que separa más palabras
+    const s = consensus + (initialOk(c, initial, given) ? 2 : 0) + (pair && pairOf(c) === pair ? 2 : 0)
+      + c.split(" ").length * 0.01;
+    if (s > bestScore) { best = c; bestScore = s; }
+  });
   return best;
 }
 

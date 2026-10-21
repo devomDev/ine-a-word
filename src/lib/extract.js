@@ -102,31 +102,57 @@ const VARIANTS = [null, gray, otsu(), otsu(-20)];
 const wordsOf = (data) =>
   (data.blocks || []).flatMap((b) => b.paragraphs.flatMap((p) => p.lines.flatMap((l) => l.words)));
 
-// Ubica las 3 líneas del nombre debajo de la etiqueta NOMBRE. La primera lectura a veces
-// omite una línea: se infiere por el espaciado entre renglones.
+// Ubica las 3 líneas del nombre: debajo de la etiqueta NOMBRE o, si el OCR no la leyó,
+// encima de DOMICILIO. Las líneas que la lectura omitió se infieren por el espaciado.
 function nameLines(words) {
-  const label = words.find((w) => /^N[O0]MBRE/i.test(w.text));
-  if (!label) return null;
-  const h = label.bbox.y1 - label.bbox.y0;
+  const label = words.find((w) => /^N[O0]MBR/i.test(w.text));
+  const dom = words.find((w) => /^D[O0]M[I1L]C/i.test(w.text));
+  const ref = label || dom;
+  if (!ref) return null;
+  const refH = ref.bbox.y1 - ref.bbox.y0;
+  const top = label ? label.bbox.y0 + refH / 2 : -Infinity;
+  // Límite inferior: DOMICILIO, o CLAVE DE ELECTOR / CURP si no se leyó
+  const below = words.filter((w) => /^D[O0]M[I1L]C|CLAVE|ELECTOR|^CURP/i.test(w.text) && w.bbox.y0 > top);
+  const bottom = below.length ? Math.min(...below.map((w) => w.bbox.y0)) - refH / 3 : Infinity;
   const firsts = words
-    .filter((w) => Math.abs(w.bbox.x0 - label.bbox.x0) < h && w.bbox.y0 > label.bbox.y0 + h / 2)
+    .filter((w) => w !== ref && Math.abs(w.bbox.x0 - ref.bbox.x0) < refH && w.bbox.y0 > top && w.bbox.y0 < bottom
+      && /[A-ZÑ]{3}/i.test(w.text))
     .sort((a, b) => a.bbox.y0 - b.bbox.y0);
-  const pitch = firsts.length && firsts[0].bbox.y0 - label.bbox.y0 < 1.5 * h
-    ? firsts[0].bbox.y0 - label.bbox.y0 : 0.85 * h;
-  const ys = [];
-  let prev = label.bbox.y0;
+
+  // Varias pasadas repiten palabras: se agrupan por renglón y se usa la caja más ajustada
+  let rows = [];
   for (const w of firsts) {
-    const gap = w.bbox.y0 - prev;
-    if (ys.length >= 3 || gap > 3.5 * pitch || /^D[O0]M/i.test(w.text)) break;
-    const k = Math.max(1, Math.round(gap / pitch));
-    for (let j = 1; j < k; j++) ys.push(prev + (j * gap) / k);
-    ys.push(w.bbox.y0);
-    prev = w.bbox.y0;
+    const last = rows[rows.length - 1];
+    const wh = w.bbox.y1 - w.bbox.y0;
+    if (last && w.bbox.y0 - last.y0 < refH / 3) {
+      if (wh < last.h) Object.assign(last, { y: w.bbox.y0, h: wh });
+      last.y0 = w.bbox.y0;
+    } else rows.push({ y: w.bbox.y0, y0: w.bbox.y0, h: wh });
   }
-  while (ys.length < 3) ys.push((ys.length ? ys[ys.length - 1] : label.bbox.y0) + pitch);
+  rows = label ? rows.slice(0, 3) : rows.slice(-3);
+  if (!rows.length) return null;
+  const hs = rows.map((r) => r.h).sort((a, b) => a - b);
+  const h = hs[hs.length >> 1];
+  const gaps = rows.slice(1).map((r, i) => r.y - rows[i].y).filter((g) => g > h / 2);
+  const pitch = Math.min(...gaps, 1.15 * h);
+
+  const lines = [];
+  let prev = label ? label.bbox.y0 : rows[0].y - pitch;
+  for (const { y } of rows) {
+    const gap = y - prev;
+    if (lines.length >= 3 || gap > 3.5 * pitch) break;
+    // La etiqueta NOMBRE deja más aire que el interlineado normal
+    const k = Math.max(1, Math.round(gap / pitch - (lines.length ? 0 : 0.4)));
+    for (let j = 1; j < k; j++) lines.push(prev + (j * gap) / k);
+    lines.push(y);
+    prev = y;
+  }
+  while (lines.length < 3 && lines[lines.length - 1] + pitch < bottom - pitch / 3) {
+    lines.push(lines[lines.length - 1] + pitch);
+  }
   return {
-    lines: ys.slice(0, 3).map((y) => [label.bbox.x0 - h / 2, y - 0.12 * pitch, 16 * h, 1.05 * pitch]),
-    gap: 1.2 * h,
+    lines: lines.slice(0, 3).map((y) => [ref.bbox.x0 - h / 2, y - 0.15 * pitch, 25 * h, 1.1 * pitch]),
+    gap: 1.5 * h,
   };
 }
 
@@ -183,6 +209,50 @@ async function refineClave(worker, canvas, words, curp) {
   return pickClave([w.text, ...readings], curp);
 }
 
+function rotate(src, deg) {
+  const out = document.createElement("canvas");
+  const swap = deg % 180 !== 0;
+  out.width = swap ? src.height : src.width;
+  out.height = swap ? src.width : src.height;
+  const ctx = out.getContext("2d", { willReadFrequently: true });
+  ctx.translate(out.width / 2, out.height / 2);
+  ctx.rotate((deg * Math.PI) / 180);
+  ctx.drawImage(src, -src.width / 2, -src.height / 2);
+  return out;
+}
+
+const orientationScore = (text) => {
+  const r = parseIne(text);
+  return (r.curpValida ? 4 : 0) + (r.claveValida ? 2 : 0)
+    + (/N[O0]MBRE/i.test(text) ? 1 : 0) + (/INSTITUTO|ELECTORAL|CREDENCIAL/i.test(text) ? 1 : 0);
+};
+
+function scaled(src, f) {
+  const out = document.createElement("canvas");
+  out.width = Math.round(src.width * f);
+  out.height = Math.round(src.height * f);
+  out.getContext("2d").drawImage(src, 0, 0, out.width, out.height);
+  return out;
+}
+
+// La foto puede venir girada. Primero se lee derecha; si no parece una INE, se prueban
+// las otras orientaciones en baja resolución y solo la mejor se lee completa.
+async function orient(worker, page, onTry) {
+  const { data } = await worker.recognize(page, {}, { blocks: true });
+  const score = orientationScore(data.text);
+  if (score >= 6) return { canvas: page, data };
+  const small = scaled(page, 0.5);
+  let best = { deg: 0, score };
+  for (const deg of [90, 270, 180]) {
+    onTry(deg);
+    const s = orientationScore((await worker.recognize(rotate(small, deg))).data.text);
+    if (s > best.score) best = { deg, score: s };
+  }
+  if (!best.deg) return { canvas: page, data };
+  const canvas = rotate(page, best.deg);
+  return { canvas, data: (await worker.recognize(canvas, {}, { blocks: true })).data };
+}
+
 const complete = (r) => r.curpValida && r.nombre && r.claveValida;
 
 export async function extractFromPdf(file, onStep = () => {}) {
@@ -217,23 +287,26 @@ export async function extractFromPdf(file, onStep = () => {}) {
   try {
     for (; pageIdx <= n; pageIdx++) {
       onStep(`Renderizando página ${pageIdx} de ${n}…`, 0.12);
-      const canvas = cropToContent(await pageToCanvas(await pdf.getPage(pageIdx)));
-      const { data } = await worker.recognize(canvas, {}, { blocks: true });
+      const page = cropToContent(await pageToCanvas(await pdf.getPage(pageIdx)));
+      const { canvas, data } = await orient(worker, page, (deg) => onStep(`Probando orientación ${deg}° (página ${pageIdx})…`, 0.3));
+      let words = wordsOf(data);
       ocr += data.text + "\n";
       let r = parseIne(ocr);
-      // Fondo holográfico: si la CURP no salió, segunda lectura en escala de grises
-      if (!r.curpValida) {
-        const g = await worker.recognize(region(canvas, [0, 0, canvas.width, canvas.height], gray));
-        ocr += g.data.text + "\n";
+      // Fondo holográfico: si falta algún dato, más lecturas con otras variantes de imagen
+      for (const fn of [otsu(-20), gray]) {
+        if (r.curpValida && r.claveValida && words.some((w) => /^N[O0]MBR/i.test(w.text))) break;
+        const extra = await worker.recognize(region(canvas, [0, 0, canvas.width, canvas.height], fn), {}, { blocks: true });
+        ocr += extra.data.text + "\n";
+        words = words.concat(wordsOf(extra.data));
         r = parseIne(ocr);
       }
       if (!clave) {
         onStep(`Leyendo clave de elector (página ${pageIdx})…`, 0.85);
-        clave = await refineClave(worker, canvas, wordsOf(data), r.curp);
+        clave = await refineClave(worker, canvas, words, r.curp);
       }
       if (!name) {
         onStep(`Leyendo nombre (página ${pageIdx})…`, 0.9);
-        name = await refineName(worker, canvas, wordsOf(data), { ...r, clave: clave?.clave || r.clave });
+        name = await refineName(worker, canvas, words, { ...r, clave: clave?.clave || r.clave });
       }
       if (r.curpValida && name && clave) break;
     }

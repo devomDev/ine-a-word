@@ -54,3 +54,16 @@ test("elige la lectura de nombre coherente con CURP y clave", () => {
   assert.equal(pickNameLine(["OMARAARON", "OMARAARON", "OMAR AARÓN", "OMAR AARON"], hints[2]), "OMAR AARON");
   assert.equal(pickNameLine(["MARÍN", "MARIN", "ARÍN", "MARIN"], hints[0]), "MARIN");
 });
+
+test("consenso entre lecturas distintas y ruido Ñ del holograma", () => {
+  const curp = "OENN930512MMCRVD0" + curpCheckDigit("OENN930512MMCRVD0");
+  const hints = nameHints(curp, "ORNVND93051215M500");
+  assert.equal(pickNameLine(["NADIA ANAR A", "NADIA AÑAHI", "NADIA ANAHF", "NADIA ANAHI"], hints[2]), "NADIA ANAHI");
+  assert.equal(pickNameLine(["NADIA ANÑAHI", "NADIA ANÑAHI", "NADIA ANÑAMI"], hints[2]), "NADIA ANAHI");
+  assert.equal(pickNameLine(["MUÑOZ", "MUÑOZ", "MUNOZ"], {}), "MUÑOZ");
+});
+
+test("clave con A leída en lugar de dígito", () => {
+  const curp = "OENN930512MMCRVD0" + curpCheckDigit("OENN930512MMCRVD0");
+  assert.equal(pickClave(["ORNVND93051215Ma00", "ORNVND93051215M500", "ORNVND93051215M500"], curp).clave, "ORNVND93051215M500");
+});
